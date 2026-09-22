@@ -56,6 +56,7 @@ import de.greenrobot.dao.query.DeleteQuery;
 import de.greenrobot.dao.query.QueryBuilder;
 import kotlin.Triple;
 import nodomain.freeyourgadget.gadgetbridge.GBApplication;
+import nodomain.freeyourgadget.gadgetbridge.BuildConfig;
 import nodomain.freeyourgadget.gadgetbridge.R;
 import nodomain.freeyourgadget.gadgetbridge.activities.SettingsActivity;
 import nodomain.freeyourgadget.gadgetbridge.activities.devicesettings.DeviceSettingsPreferenceConst;
@@ -125,6 +126,8 @@ import nodomain.freeyourgadget.gadgetbridge.model.MusicSpec;
 import nodomain.freeyourgadget.gadgetbridge.model.MusicStateSpec;
 import nodomain.freeyourgadget.gadgetbridge.model.NavigationInfoSpec;
 import nodomain.freeyourgadget.gadgetbridge.model.NotificationSpec;
+import nodomain.freeyourgadget.gadgetbridge.model.DeviceType;
+import nodomain.freeyourgadget.gadgetbridge.externalevents.PhoneAlarmBridge;
 import nodomain.freeyourgadget.gadgetbridge.model.RecordedDataTypes;
 import nodomain.freeyourgadget.gadgetbridge.model.WeatherSpec;
 
@@ -193,6 +196,7 @@ import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.GetH
 import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.GetSleepDataCountRequest;
 import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.GetStepDataCountRequest;
 import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.SendNotificationRequest;
+import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.PhoneAlarmRequest;
 import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.SetMusicRequest;
 import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.AlarmsRequest;
 import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.DebugRequest;
@@ -309,6 +313,7 @@ public class HuaweiSupportProvider {
     protected HuaweiMusicManager huaweiMusicManager = new HuaweiMusicManager(this);
 
     protected HuaweiNotificationsManager huaweiNotificationsManager = new HuaweiNotificationsManager(this);
+    private Integer activePhoneAlarmNotificationId;
 
     //TODO: we need only one instance of manager and all it services.
     protected HuaweiP2PManager huaweiP2PManager = new HuaweiP2PManager(this);
@@ -1758,7 +1763,22 @@ public class HuaweiSupportProvider {
         return msgId;
     }
 
-    public void onNotification(NotificationSpec notificationSpec) {
+    public synchronized void onNotification(NotificationSpec notificationSpec) {
+        if (getDevice().getType() == DeviceType.HUAWEIBAND10
+                && PhoneAlarmBridge.DEVICE_CATEGORY.equals(notificationSpec.category)) {
+            if (activePhoneAlarmNotificationId != null) {
+                LOG.debug("Ignoring duplicate native phone alarm start");
+                return;
+            }
+            try {
+                new PhoneAlarmRequest(this, true, System.currentTimeMillis()).send();
+                activePhoneAlarmNotificationId = notificationSpec.getId();
+                LOG.info("Native phone alarm start queued: notificationId={}", activePhoneAlarmNotificationId);
+            } catch (IOException e) {
+                LOG.error("Failed to queue native phone alarm start", e);
+            }
+            return;
+        }
         if (!GBApplication.getDeviceSpecificSharedPrefs(getDevice().getAddress()).getBoolean(DeviceSettingsPreferenceConst.PREF_NOTIFICATION_ENABLE, false)) {
             // Don't send notifications when they are disabled
             LOG.info("Stopped notification as they are disabled.");
@@ -1767,8 +1787,26 @@ public class HuaweiSupportProvider {
         huaweiNotificationsManager.onNotification(notificationSpec);
     }
 
-    public void onDeleteNotification(int id) {
+    public synchronized void onDeleteNotification(int id) {
+        if (activePhoneAlarmNotificationId != null && activePhoneAlarmNotificationId == id) {
+            dismissActivePhoneAlarm("phone alarm ended");
+            return;
+        }
         huaweiNotificationsManager.onDeleteNotification(id);
+    }
+
+    private synchronized void dismissActivePhoneAlarm(final String reason) {
+        if (activePhoneAlarmNotificationId == null) {
+            return;
+        }
+        final int notificationId = activePhoneAlarmNotificationId;
+        activePhoneAlarmNotificationId = null;
+        try {
+            new PhoneAlarmRequest(this, false, 0).send();
+            LOG.info("Native phone alarm dismiss queued: notificationId={}, reason={}", notificationId, reason);
+        } catch (IOException e) {
+            LOG.error("Failed to queue native phone alarm dismiss: notificationId={}, reason={}", notificationId, reason, e);
+        }
     }
 
     public void setDateFormat() {
@@ -2794,6 +2832,7 @@ public class HuaweiSupportProvider {
     }
 
     public void dispose() {
+        dismissActivePhoneAlarm("Huawei support disposed");
         heartRateSyncScheduler.stop();
         stopBatteryRunnerDelayed();
         huaweiFileDownloadManager.dispose();
@@ -3215,7 +3254,35 @@ public class HuaweiSupportProvider {
         syncState.updateState(needSync);
     }
 
-    public void onTestNewFunction() {
+    public void onTestNewFunction(@Nullable Bundle options) {
+        final String phoneAlarmProbeAction = options == null
+                ? null
+                : options.getString(HuaweiPhoneAlarmDebugProbeContract.ACTION_KEY);
+        if (HuaweiPhoneAlarmDebugProbeContract.ACTION_SEND_ONCE.equals(phoneAlarmProbeAction)
+                || HuaweiPhoneAlarmDebugProbeContract.ACTION_SEND_DISMISS_ONCE.equals(phoneAlarmProbeAction)) {
+            if (!BuildConfig.DEBUG) {
+                LOG.warn("Ignoring Huawei phone alarm probe outside a debug build");
+                return;
+            }
+
+            try {
+                final Class<?> senderClass = Class.forName(
+                        "nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.HuaweiPhoneAlarmDebugProbeSender"
+                );
+                senderClass
+                        .getMethod(
+                                HuaweiPhoneAlarmDebugProbeContract.ACTION_SEND_DISMISS_ONCE.equals(phoneAlarmProbeAction)
+                                        ? "sendDismissOnce"
+                                        : "sendOnce",
+                                HuaweiSupportProvider.class,
+                                Bundle.class
+                        )
+                        .invoke(null, this, options);
+            } catch (ReflectiveOperationException e) {
+                LOG.error("Huawei phone alarm debug probe sender is unavailable", e);
+            }
+            return;
+        }
 
         AsyncTask.execute(() -> {
             long startTime = System.nanoTime();

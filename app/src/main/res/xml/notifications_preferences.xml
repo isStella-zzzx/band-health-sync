@@ -16,6 +16,14 @@
             app:iconSpaceReserved="false" />
 
         <SwitchPreferenceCompat
+            android:defaultValue="true"
+            android:key="phone_alarm_band_link"
+            android:layout="@layout/preference_checkbox"
+            android:summary="@string/pref_phone_alarm_band_link_summary"
+            android:title="@string/pref_phone_alarm_band_link_title"
+            app:iconSpaceReserved="false" />
+
+        <SwitchPreferenceCompat
             android:defaultValue="false"
             android:key="notifications_generic_whenscreenon"
             android:layout="@layout/preference_checkbox"

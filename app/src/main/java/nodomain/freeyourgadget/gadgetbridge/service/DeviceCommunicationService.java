@@ -48,6 +48,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.widget.Toast;
 
 import androidx.annotation.Nullable;
@@ -79,6 +80,7 @@ import nodomain.freeyourgadget.gadgetbridge.capabilities.loyaltycards.LoyaltyCar
 import nodomain.freeyourgadget.gadgetbridge.deviceevents.GBDeviceEventCameraRemote;
 import nodomain.freeyourgadget.gadgetbridge.devices.DeviceCoordinator;
 import nodomain.freeyourgadget.gadgetbridge.externalevents.AlarmClockReceiver;
+import nodomain.freeyourgadget.gadgetbridge.externalevents.PhoneAlarmBridge;
 import nodomain.freeyourgadget.gadgetbridge.externalevents.DeviceAlarmReceiver;
 import nodomain.freeyourgadget.gadgetbridge.externalevents.BluetoothConnectReceiver;
 import nodomain.freeyourgadget.gadgetbridge.externalevents.BluetoothPairingRequestReceiver;
@@ -257,10 +259,16 @@ public class DeviceCommunicationService extends Service implements SharedPrefere
     }
 
     private static final Logger LOG = LoggerFactory.getLogger(DeviceCommunicationService.class);
+    static final long SERVICE_CREATION_RECONNECT_DELAY_MS = 5000;
     @SuppressLint("StaticFieldLeak") // only used for test cases
     private static DeviceSupportFactory DEVICE_SUPPORT_FACTORY = null;
 
     private DeviceSupportFactory mFactory;
+    private final Handler serviceCreationHandler = new Handler(Looper.getMainLooper());
+    private final Runnable serviceCreationReconnect = () -> {
+        LOG.info("No connection command followed service creation; restoring automatic connections");
+        reconnectAfterServiceRestart();
+    };
     private final ArrayList<DeviceStruct> deviceStructs = new ArrayList<>(1);
     private final HashMap<String, ArrayList<Intent>> cachedNotifications = new HashMap<>();
 
@@ -608,7 +616,18 @@ public class DeviceCommunicationService extends Service implements SharedPrefere
 
             Intent scanServiceIntent = new Intent(this, BLEScanService.class);
             startService(scanServiceIntent);
+        } else {
+            scheduleReconnectAfterServiceCreation();
         }
+    }
+
+    void scheduleReconnectAfterServiceCreation() {
+        serviceCreationHandler.removeCallbacks(serviceCreationReconnect);
+        serviceCreationHandler.postDelayed(serviceCreationReconnect, SERVICE_CREATION_RECONNECT_DELAY_MS);
+    }
+
+    void cancelReconnectAfterServiceCreation() {
+        serviceCreationHandler.removeCallbacks(serviceCreationReconnect);
     }
 
     private void scanAllDevices(){
@@ -812,11 +831,17 @@ public class DeviceCommunicationService extends Service implements SharedPrefere
     @Override
     public synchronized int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) {
-            LOG.info("no intent");
+            cancelReconnectAfterServiceCreation();
+            LOG.info("Service was restarted without an intent, restoring automatic connections");
+            reconnectAfterServiceRestart();
             return START_STICKY;
         }
 
         String action = intent.getAction();
+
+        if (ACTION_CONNECT.equals(action) || ACTION_DISCONNECT.equals(action)) {
+            cancelReconnectAfterServiceCreation();
+        }
 
         if (action == null) {
             LOG.info("no action");
@@ -882,6 +907,15 @@ public class DeviceCommunicationService extends Service implements SharedPrefere
                 break;
         }
         return START_STICKY;
+    }
+
+    protected void reconnectAfterServiceRestart() {
+        if (reconnectViaScan) {
+            LOG.info("Reconnect-by-scan is enabled; waiting for the scan started during service creation");
+            return;
+        }
+
+        connectToDevice(null, false);
     }
 
     /**
@@ -1486,15 +1520,7 @@ public class DeviceCommunicationService extends Service implements SharedPrefere
                 mBlueToothPairingRequestReceiver = new BluetoothPairingRequestReceiver(this);
                 ContextCompat.registerReceiver(this, mBlueToothPairingRequestReceiver, new IntentFilter(BluetoothDevice.ACTION_PAIRING_REQUEST), ContextCompat.RECEIVER_EXPORTED);
             }
-            if (mAlarmClockReceiver == null) {
-                mAlarmClockReceiver = new AlarmClockReceiver();
-                IntentFilter filter = new IntentFilter();
-                filter.addAction(AlarmClockReceiver.ALARM_ALERT_ACTION);
-                filter.addAction(AlarmClockReceiver.ALARM_DONE_ACTION);
-                filter.addAction(AlarmClockReceiver.GOOGLE_CLOCK_ALARM_ALERT_ACTION);
-                filter.addAction(AlarmClockReceiver.GOOGLE_CLOCK_ALARM_DONE_ACTION);
-                ContextCompat.registerReceiver(this, mAlarmClockReceiver, filter, ContextCompat.RECEIVER_EXPORTED);
-            }
+            setPhoneAlarmReceiverEnabled(PhoneAlarmBridge.isEnabled());
 
             if (mSilentModeReceiver == null) {
                 mSilentModeReceiver = new SilentModeReceiver();
@@ -1585,6 +1611,7 @@ public class DeviceCommunicationService extends Service implements SharedPrefere
                 unregisterReceiver(mAlarmClockReceiver);
                 mAlarmClockReceiver = null;
             }
+            PhoneAlarmBridge.getInstance().reset();
             if (mSilentModeReceiver != null) {
                 unregisterReceiver(mSilentModeReceiver);
                 mSilentModeReceiver = null;
@@ -1639,6 +1666,7 @@ public class DeviceCommunicationService extends Service implements SharedPrefere
 
     @Override
     public void onDestroy() {
+        cancelReconnectAfterServiceCreation();
         if (hasPrefs()) {
             getPrefs().getPreferences().unregisterOnSharedPreferenceChangeListener(this);
         }
@@ -1690,6 +1718,11 @@ public class DeviceCommunicationService extends Service implements SharedPrefere
 
     @Override
     public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key) {
+        if (PhoneAlarmBridge.PREF_KEY.equals(key)) {
+            final boolean enabled = sharedPreferences.getBoolean(PhoneAlarmBridge.PREF_KEY, true);
+            PhoneAlarmBridge.getInstance().onEnabledChanged(enabled);
+            setPhoneAlarmReceiverEnabled(enabled);
+        }
         if (GBPrefs.DEVICE_AUTO_RECONNECT.equals(key)) {
             for(DeviceStruct deviceStruct : deviceStructs){
                 boolean autoReconnect = getPrefs().getAutoReconnect(deviceStruct.getDevice());
@@ -1702,6 +1735,21 @@ public class DeviceCommunicationService extends Service implements SharedPrefere
         if (GBPrefs.PREF_ALLOW_INTENT_API.equals(key)){
             allowBluetoothIntentApi = sharedPreferences.getBoolean(GBPrefs.PREF_ALLOW_INTENT_API, false);
             LOG.info("allowBluetoothIntentApi changed to {}", allowBluetoothIntentApi);
+        }
+    }
+
+    private void setPhoneAlarmReceiverEnabled(final boolean enabled) {
+        if (enabled && mAlarmClockReceiver == null) {
+            mAlarmClockReceiver = new AlarmClockReceiver();
+            final IntentFilter filter = new IntentFilter();
+            filter.addAction(AlarmClockReceiver.ALARM_ALERT_ACTION);
+            filter.addAction(AlarmClockReceiver.ALARM_DONE_ACTION);
+            filter.addAction(AlarmClockReceiver.GOOGLE_CLOCK_ALARM_ALERT_ACTION);
+            filter.addAction(AlarmClockReceiver.GOOGLE_CLOCK_ALARM_DONE_ACTION);
+            ContextCompat.registerReceiver(this, mAlarmClockReceiver, filter, ContextCompat.RECEIVER_EXPORTED);
+        } else if (!enabled && mAlarmClockReceiver != null) {
+            unregisterReceiver(mAlarmClockReceiver);
+            mAlarmClockReceiver = null;
         }
     }
 

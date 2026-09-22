@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.widget.DatePicker
 import android.widget.Toast
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import nodomain.freeyourgadget.gadgetbridge.BuildConfig
 import nodomain.freeyourgadget.gadgetbridge.GBApplication
 import nodomain.freeyourgadget.gadgetbridge.R
 import nodomain.freeyourgadget.gadgetbridge.model.RecordedDataTypes
@@ -21,6 +22,16 @@ class OtherDebugFragment : AbstractDebugFragment() {
 
     private fun setupPreferences() {
         setPreferencesFromResource(R.xml.debug_preferences_other_actions, null)
+
+        if (BuildConfig.DEBUG) {
+            addDynamicPref(
+                title = getString(R.string.huawei_phone_alarm_probe_title),
+                summary = getString(R.string.huawei_phone_alarm_probe_summary),
+                icon = R.drawable.ic_access_time
+            ) {
+                openHuaweiPhoneAlarmProbe()
+            }
+        }
 
         onClick(PREF_DEBUG_SET_TIME) {
             runOnDebugDevices("Set time") {
@@ -111,6 +122,22 @@ class OtherDebugFragment : AbstractDebugFragment() {
         }
     }
 
+    private fun openHuaweiPhoneAlarmProbe() {
+        try {
+            val fragmentClass = Class.forName(HUAWEI_PHONE_ALARM_PROBE_FRAGMENT)
+                .asSubclass(AbstractDebugFragment::class.java)
+            goTo(fragmentClass.getDeclaredConstructor().newInstance())
+        } catch (e: ReflectiveOperationException) {
+            GB.toast(
+                requireContext(),
+                getString(R.string.huawei_phone_alarm_probe_unavailable),
+                Toast.LENGTH_LONG,
+                GB.ERROR,
+                e
+            )
+        }
+    }
+
     companion object {
         private const val PREF_DEBUG_SET_TIME = "pref_debug_set_time"
         private const val ACTIVITY_LIST_DEBUG_EXTRA_TIME_RANGE = "activity_list_debug_extra_time_range"
@@ -120,5 +147,7 @@ class OtherDebugFragment : AbstractDebugFragment() {
         private const val PREF_DEBUG_HEADER_RESET = "pref_debug_header_reset"
         private const val PREF_DEBUG_REBOOT = "pref_debug_reboot"
         private const val PREF_DEBUG_FACTORY_RESET = "pref_debug_factory_reset"
+        private const val HUAWEI_PHONE_ALARM_PROBE_FRAGMENT =
+            "nodomain.freeyourgadget.gadgetbridge.activities.debug.HuaweiPhoneAlarmDebugProbeFragment"
     }
 }

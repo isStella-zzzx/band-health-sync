@@ -215,7 +215,7 @@ public class HuaweiLESupport extends AbstractBTLESingleDeviceSupport {
 
     @Override
     public void onTestNewFunction(@Nullable Bundle options) {
-        supportProvider.onTestNewFunction();
+        supportProvider.onTestNewFunction(options);
     }
 
     @Override

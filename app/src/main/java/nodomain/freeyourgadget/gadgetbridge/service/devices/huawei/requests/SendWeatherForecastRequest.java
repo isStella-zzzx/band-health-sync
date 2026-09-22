@@ -38,6 +38,16 @@ public class SendWeatherForecastRequest extends Request {
     }
 
     @Override
+    protected void processResponse() throws ResponseParseException {
+        int status = receivedPacket.getTlv().getInteger(0x7f, -1);
+        if (status != 0x000186A0) {
+            throw new ResponseParseException("Weather forecast rejected: status=0x"
+                    + Integer.toHexString(status) + ", hours=" + Math.min(weatherSpec.getHourly().size(), 24)
+                    + ", days=" + Math.min(weatherSpec.getForecasts().size() + 1, 8));
+        }
+    }
+
+    @Override
     protected List<byte[]> createRequest() throws RequestCreationException {
         int hourlyCount = Math.min(weatherSpec.getHourly().size(), 24);
         int dayCount = Math.min(weatherSpec.getForecasts().size() + 1, 8); // We add today as well

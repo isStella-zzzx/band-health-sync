@@ -678,8 +678,11 @@ public class SettingsActivity extends AbstractSettingsActivityV2 {
         }
 
         private boolean hasValidWeatherLocation() {
-            final float[] longLat = GBApplication.getPrefs().getLongLat(requireContext());
-            return isValidWeatherLocation(longLat[1], longLat[0]);
+            final Prefs prefs = GBApplication.getPrefs();
+            return isValidWeatherLocation(
+                    prefs.getFloat("location_latitude", 0f),
+                    prefs.getFloat("location_longitude", 0f)
+            );
         }
 
         private static boolean isValidWeatherLocation(float latitude, float longitude) {
@@ -695,12 +698,14 @@ public class SettingsActivity extends AbstractSettingsActivityV2 {
             if (preference == null || context == null) {
                 return;
             }
-            final float[] longLat = GBApplication.getPrefs().getLongLat(context);
-            if (!isValidWeatherLocation(longLat[1], longLat[0])) {
+            final Prefs prefs = GBApplication.getPrefs();
+            final float latitude = prefs.getFloat("location_latitude", 0f);
+            final float longitude = prefs.getFloat("location_longitude", 0f);
+            if (!isValidWeatherLocation(latitude, longitude)) {
                 preference.setSummary(R.string.builtin_weather_location_summary);
                 return;
             }
-            final String coordinates = String.format(Locale.US, "%.4f, %.4f", longLat[1], longLat[0]);
+            final String coordinates = String.format(Locale.US, "%.4f, %.4f", latitude, longitude);
             preference.setSummary(getString(R.string.builtin_weather_location_set, coordinates));
         }
 

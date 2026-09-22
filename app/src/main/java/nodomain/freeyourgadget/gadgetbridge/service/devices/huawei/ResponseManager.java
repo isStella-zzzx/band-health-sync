@@ -24,8 +24,12 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import nodomain.freeyourgadget.gadgetbridge.BuildConfig;
 import nodomain.freeyourgadget.gadgetbridge.devices.huawei.HuaweiPacket;
+import nodomain.freeyourgadget.gadgetbridge.devices.huawei.HuaweiTLV;
+import nodomain.freeyourgadget.gadgetbridge.devices.huawei.packets.Alarms;
 import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.Request;
+import nodomain.freeyourgadget.gadgetbridge.util.StringUtils;
 
 /**
  * Manages all response data.
@@ -104,6 +108,8 @@ public class ResponseManager {
             }
 
             if (receivedPacket.complete) {
+                logPhoneAlarmProbeResponse(receivedPacket);
+
                 Request handler = null;
                 synchronized (handlers) {
                     for (Request req : handlers) {
@@ -133,5 +139,25 @@ public class ResponseManager {
                 receivedPacket = null;
             }
         } while (left > 0);
+    }
+
+    private static void logPhoneAlarmProbeResponse(HuaweiPacket packet) {
+        if (!BuildConfig.DEBUG || packet.serviceId != Alarms.id) {
+            return;
+        }
+
+        final int command = packet.commandId & 0xff;
+        if (command != 0x09 && command != 0x0a) {
+            return;
+        }
+
+        final HuaweiTLV tlv = packet.getTlv();
+        final String tlvHex = tlv == null ? "<none>" : StringUtils.bytesToHex(tlv.serialize());
+        LOG.info(
+                "Huawei phone alarm probe response observed: service=0x08, command=0x{}, tlvHex={}; " +
+                        "direction, ACK status, time unit, and action semantics remain unconfirmed",
+                String.format("%02x", command),
+                tlvHex
+        );
     }
 }

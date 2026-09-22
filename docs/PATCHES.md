@@ -50,10 +50,19 @@
 
 ### 内置免费天气
 
-- 行为：可选启用 Open-Meteo 天气源，使用手机保存的位置获取当前天气、逐小时和 7 天预报，
+- 行为：可选启用 Open-Meteo 天气源，使用手机保存的位置获取当前天气、逐小时和 8 天预报，
   复用 Gadgetbridge 现有设备天气协议；支持设置页定位、立即刷新和每小时 WorkManager 刷新。
 - 不需要天气 App、账号或 API key；关闭开关会取消周期任务。
-- 覆盖区：`util/builtinweather/`、天气设置页、天气偏好与对应单测。
+- 预报天数从 7 天增至 8 天（部分华为设备要求）；逐小时预报改为严格提供未来 24 小时，
+  不再把已经过去的当前小时计入，避免手表侧少一小时或错位；新增月相计算，逐日预报和
+  当日天气都带上月相角度。
+- 定位坐标来源从「每次读取 Android 系统最近已知位置」改为「读取已保存的位置偏好」，
+  避免网络定位在使用 VPN 时跳到出口地区、导致天气与实际所在地不符；发送到手表前会先
+  校验坐标范围合法。
+- 天气请求增加响应状态码校验，请求被手表拒绝时明确抛错，不再静默当作成功。
+- 覆盖区：`util/builtinweather/`、`HuaweiWeatherManager`、`SendWeatherForecastRequest`、
+  天气设置页、天气偏好与对应单测。
+- 验证：`BuiltinWeatherFetcherTest`、`SendWeatherForecastRequestTest` 定向单测通过。
 
 ### 经期上下文（自托管）
 
@@ -278,6 +287,52 @@
   - `GBDaoGenerator/build.gradle.kts`
 - 验证：`assembleMainlineDebug` 通过；当前 Android Gradle Plugin 对 SDK 37 会给出上游兼容性警告，不影响产物生成。
 - commits：`c16bd7b82`、`838ede8c0`
+
+### HyperOS 手机闹钟联动 Band 10
+
+- 目的：手机闹钟响铃时，让已配对的 Huawei Band 10 同步震动提醒，铃声结束后自动停止。
+- 行为：
+  - 通知设置页新增开关「手机闹钟同步到手环」，默认开启；关闭后动态注销监听并结束当前
+    提醒；应用退出或服务销毁时同样清理未结束的提醒；
+  - 同时识别系统闹钟通知（`category=alarm`，结合全屏 intent、insistent flag，或 ongoing
+    加 alarm 音频用途判断正在响铃）与经典 AOSP/Google Clock 公开广播，两条链路统一桥接到
+    同一个状态机，避免重复或遗漏；不读取通知标题、正文或私人备注；
+  - 响铃开始下发原生闹钟指令（service 0x08 / command 0x09），结束时下发停止指令
+    （0x08 / 0x0A）；只对 Huawei Band 10 生效；
+  - 附带一个仅 debug 编译可见的「闹钟探针」调试工具（其他调试项 → Huawei phone alarm
+    probe），用于手动构造并发送单个未加密候选协议包、查看规范化 hex，辅助后续验证时间
+    单位、snooze 语义、ACK 方向等尚未完全确认的协议细节；每次发送需弹窗人工确认，每个
+    请求令牌只能触发一次，正式 release 编译不含该入口。
+- 覆盖区：
+  - `externalevents/PhoneAlarmBridge.java`、`PhoneAlarmNotificationDetector.java`、
+    `AlarmClockReceiver.java`、`NotificationListener.java`
+  - `devices/huawei/packets/PhoneAlarm.java`
+  - `service/devices/huawei/requests/PhoneAlarmRequest.java`、`SendNotificationRequest.java`
+  - `service/devices/huawei/HuaweiSupportProvider.java`、`ResponseManager.java`
+  - `service/DeviceCommunicationService.java`
+  - debug-only：`activities/debug/HuaweiPhoneAlarmDebugProbeFragment.kt`、
+    `devices/huawei/packets/HuaweiPhoneAlarmDebug*`、
+    `service/devices/huawei/HuaweiPhoneAlarmDebugProbeContract.java`、
+    `HuaweiPhoneAlarmDebugProbeSender.java`
+- 验证：`PhoneAlarmTest`、`PhoneAlarmBridgeTest`、`PhoneAlarmNotificationDetectorTest` 共
+  19 项定向单测通过；私仓已在真实 HyperOS 闹钟响铃与停止场景实机验证。
+- 限制：手表侧时间单位、snooze 语义、ACK 方向仍未完全确认，探针工具用于继续验证，
+  不代表协议已固化。
+
+### 服务被系统重建后自动恢复连接
+
+- 目的：HyperOS 等系统在后台清理场景下可能只重新创建 `DeviceCommunicationService`
+  而不携带任何明确指令，此前这种情况下应用不会自动恢复连接，需要用户手动打开 App。
+- 行为：
+  - 服务创建后 5 秒内若没有收到任何明确的连接、断开指令或 `START_STICKY` 空 intent，
+    按设备原有的自动重连设置尝试恢复连接；
+  - 收到 `START_STICKY` 空 intent（常见于系统一键清理后重建服务）时同样主动恢复连接；
+  - 收到明确的连接或断开指令时取消上述延迟兜底，避免重复直连或覆盖用户主动发起的断开；
+  - 启用「扫描后重连」的设备继续走原有扫描路径，不被这个兜底重复触发。
+- 覆盖区：`service/DeviceCommunicationService.java`
+- 验证：`DeviceCommunicationServiceRestartTest` 4 项定向测试通过（空 intent 触发恢复、
+  只创建服务触发延迟恢复、明确指令不误判、明确指令取消兜底）；私仓已在真机通过一键清理
+  与单独上滑清理两种场景验证自动重连。
 
 ## 上游合并检查
 

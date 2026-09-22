@@ -20,19 +20,8 @@ package nodomain.freeyourgadget.gadgetbridge.externalevents;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.text.format.DateFormat;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.util.ArrayList;
-import java.util.Date;
-
-import nodomain.freeyourgadget.gadgetbridge.GBApplication;
-import nodomain.freeyourgadget.gadgetbridge.R;
-import nodomain.freeyourgadget.gadgetbridge.model.NotificationSpec;
-import nodomain.freeyourgadget.gadgetbridge.model.NotificationType;
-import nodomain.freeyourgadget.gadgetbridge.util.NotificationUtils;
 
 public class AlarmClockReceiver extends BroadcastReceiver {
     private static final Logger LOG = LoggerFactory.getLogger(AlarmClockReceiver.class);
@@ -60,9 +49,6 @@ public class AlarmClockReceiver extends BroadcastReceiver {
     /** A public action sent by AlarmService when the alarm has stopped for any reason. */
     public static final String ALARM_DONE_ACTION = "com.android.deskclock.ALARM_DONE";
     public static final String GOOGLE_CLOCK_ALARM_DONE_ACTION = "com.google.android.deskclock.action.ALARM_DONE";
-    private int lastId;
-
-
     @Override
     public void onReceive(final Context context, final Intent intent) {
         final String action = intent.getAction();
@@ -82,53 +68,10 @@ public class AlarmClockReceiver extends BroadcastReceiver {
             return;
         }
 
-        if (GBApplication.getPrefs().getString("notification_list_is_blacklist", "true").equals("true")) {
-            if (GBApplication.appIsNotifBlacklisted(packageName)) {
-                LOG.info("Ignoring alarm action, application is blacklisted");
-                return;
-            }
-        } else {
-            if (!GBApplication.appIsNotifBlacklisted(packageName)) {
-                LOG.info("Ignoring alarm action, application is not whitelisted");
-                return;
-            }
-        }
-
         if (ALARM_ALERT_ACTION.equals(action) || GOOGLE_CLOCK_ALARM_ALERT_ACTION.equals(action)) {
-            sendAlarm(context, true, packageName);
+            PhoneAlarmBridge.getInstance().onBroadcastChanged(context, packageName, true);
         } else if (ALARM_DONE_ACTION.equals(action) || GOOGLE_CLOCK_ALARM_DONE_ACTION.equals(action)) {
-            sendAlarm(context, false, packageName);
-        }
-    }
-
-    private synchronized void sendAlarm(Context context, boolean on, String packageName) {
-        dismissLastAlarm();
-        if (on) {
-            NotificationSpec notificationSpec = new NotificationSpec();
-            //TODO: can we attach a dismiss action to the notification and not use the notification ID explicitly?
-            lastId = notificationSpec.getId();
-            notificationSpec.type = NotificationType.GENERIC_ALARM_CLOCK;
-            notificationSpec.sourceAppId = packageName;
-            final String appLabel = NotificationUtils.getApplicationLabel(context, packageName);
-            notificationSpec.sourceName = appLabel != null ? appLabel : "Alarm Clock";
-            notificationSpec.title = context.getString(R.string.menuitem_alarm);
-            notificationSpec.body = DateFormat.getTimeFormat(context).format(new Date());
-            notificationSpec.attachedActions = new ArrayList<>();
-
-            // DISMISS ALL action
-            NotificationSpec.Action dismissAllAction = new NotificationSpec.Action();
-            dismissAllAction.title = context.getString(R.string.notifications_dismiss_all);
-            dismissAllAction.type = NotificationSpec.Action.TYPE_SYNTECTIC_DISMISS_ALL;
-            notificationSpec.attachedActions.add(dismissAllAction);
-
-            GBApplication.deviceService().onNotification(notificationSpec);
-        }
-    }
-
-    private void dismissLastAlarm() {
-        if (lastId != 0) {
-            GBApplication.deviceService().onDeleteNotification(lastId);
-            lastId = 0;
+            PhoneAlarmBridge.getInstance().onBroadcastChanged(context, packageName, false);
         }
     }
 }

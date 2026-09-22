@@ -16,7 +16,6 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>. */
 package nodomain.freeyourgadget.gadgetbridge.service.devices.huawei;
 
-import android.location.Location;
 import android.widget.Toast;
 
 import org.slf4j.Logger;
@@ -43,7 +42,6 @@ import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.Send
 import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.SendWeatherSunMoonSupportRequest;
 import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.SendWeatherSupportRequest;
 import nodomain.freeyourgadget.gadgetbridge.service.devices.huawei.requests.SendWeatherUnitRequest;
-import nodomain.freeyourgadget.gadgetbridge.webview.CurrentPosition;
 import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils;
 import nodomain.freeyourgadget.gadgetbridge.util.GB;
 
@@ -270,10 +268,15 @@ public class HuaweiWeatherManager {
 
         if (supportProvider.getDeviceState().supportsGpsAndTimeToDevice() &&
                 GBApplication.getDevicePrefs(supportProvider.getDevice()).getBoolean("pref_huawei_gps_and_time", true)) {
-            Location location = new CurrentPosition().getLastKnownLocation();
-            BigDecimal latitude = toBigDecimal(location.getLatitude());
-            BigDecimal longitude = toBigDecimal(location.getLongitude());
-            if (latitude != null && longitude != null) {
+            // Keep the device coordinates consistent with the weather payload. Reading Android's
+            // network-derived last known location here can point at a VPN exit country even when
+            // the built-in weather source is using the user's saved location.
+            BigDecimal latitude = toBigDecimal(weatherSpec.getLatitude());
+            BigDecimal longitude = toBigDecimal(weatherSpec.getLongitude());
+            if (latitude != null && longitude != null &&
+                    latitude.doubleValue() >= -90 && latitude.doubleValue() <= 90 &&
+                    longitude.doubleValue() >= -180 && longitude.doubleValue() <= 180 &&
+                    (latitude.doubleValue() != 0 || longitude.doubleValue() != 0)) {
                 double lat = latitude.setScale(7, RoundingMode.HALF_UP).doubleValue();
                 double lon = longitude.setScale(7, RoundingMode.HALF_UP).doubleValue();
                 //TODO: should be timestamp when location is set, set old enough to prevent override location determined by workout

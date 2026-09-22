@@ -36,6 +36,7 @@ import android.content.IntentFilter;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.media.AudioAttributes;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.MediaSession;
@@ -349,6 +350,8 @@ public class NotificationListener extends NotificationListenerService {
         notificationStack.add(sbn.getPackageName());
 
         if (isServiceNotRunningAndShouldIgnoreNotifications()) return;
+
+        if (handlePhoneAlarmNotification(sbn, rankingMap)) return;
 
         final GBPrefs prefs = GBApplication.getPrefs();
 
@@ -1032,6 +1035,8 @@ public class NotificationListener extends NotificationListenerService {
 
         if (isServiceNotRunningAndShouldIgnoreNotifications()) return;
 
+        if (handlePhoneAlarmNotificationRemoved(sbn)) return;
+
         final GBPrefs prefs = GBApplication.getPrefs();
 
         if (isOutsideNotificationTimes(prefs)) {
@@ -1138,6 +1143,85 @@ public class NotificationListener extends NotificationListenerService {
                 sbn.getNotification().category,
                 sbn.getNotification().flags
         );
+    }
+
+    private boolean handlePhoneAlarmNotification(final StatusBarNotification sbn, final RankingMap rankingMap) {
+        final Notification notification = sbn.getNotification();
+        final PhoneAlarmBridge bridge = PhoneAlarmBridge.getInstance();
+        final String channelId = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? notification.getChannelId()
+                : null;
+        final boolean alarmNotification = PhoneAlarmNotificationDetector.isAlarmNotification(
+                sbn.getPackageName(),
+                notification.category,
+                channelId
+        );
+        if (!alarmNotification && !bridge.isNotificationTracked(sbn.getKey())) {
+            return false;
+        }
+
+        boolean hasAlarmChannelAudio = false;
+        if (rankingMap != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            final Ranking ranking = new Ranking();
+            if (rankingMap.getRanking(sbn.getKey(), ranking)) {
+                final NotificationChannel channel = ranking.getChannel();
+                hasAlarmChannelAudio = channel != null && hasAlarmUsage(channel.getAudioAttributes());
+            }
+        }
+
+        final boolean hasAlarmAudio = hasAlarmUsage(notification.audioAttributes);
+        final boolean isCountdownTimer = notification.extras != null
+                && (notification.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER, false)
+                || notification.extras.getBoolean(Notification.EXTRA_CHRONOMETER_COUNT_DOWN, false));
+        final boolean ringing = PhoneAlarmNotificationDetector.isRinging(
+                alarmNotification,
+                notification.fullScreenIntent != null,
+                sbn.isOngoing(),
+                (notification.flags & Notification.FLAG_INSISTENT) != 0,
+                hasAlarmAudio,
+                hasAlarmChannelAudio,
+                isCountdownTimer
+        );
+
+        LOG.info(
+                "Phone alarm notification {}: ringing={}, channel={}, category={}, ongoing={}, fullScreen={}, insistent={}, alarmAudio={}, alarmChannelAudio={}, countdown={}",
+                sbn.getKey(),
+                ringing,
+                channelId,
+                notification.category,
+                sbn.isOngoing(),
+                notification.fullScreenIntent != null,
+                (notification.flags & Notification.FLAG_INSISTENT) != 0,
+                hasAlarmAudio,
+                hasAlarmChannelAudio,
+                isCountdownTimer
+        );
+        bridge.onNotificationChanged(this, sbn.getKey(), sbn.getPackageName(), ringing);
+        // Alarm notifications are handled only by the bridge. This keeps future-alarm and
+        // timer status notifications from leaking into the ordinary notification path.
+        return true;
+    }
+
+    private boolean handlePhoneAlarmNotificationRemoved(final StatusBarNotification sbn) {
+        final PhoneAlarmBridge bridge = PhoneAlarmBridge.getInstance();
+        final Notification notification = sbn.getNotification();
+        final String channelId = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? notification.getChannelId()
+                : null;
+        final boolean handled = PhoneAlarmNotificationDetector.isAlarmNotification(
+                sbn.getPackageName(),
+                notification.category,
+                channelId
+        )
+                || bridge.isNotificationTracked(sbn.getKey());
+        if (handled) {
+            bridge.onNotificationRemoved(sbn.getKey());
+        }
+        return handled;
+    }
+
+    private static boolean hasAlarmUsage(final AudioAttributes audioAttributes) {
+        return audioAttributes != null && audioAttributes.getUsage() == AudioAttributes.USAGE_ALARM;
     }
 
     private void dumpExtras(Bundle bundle) {

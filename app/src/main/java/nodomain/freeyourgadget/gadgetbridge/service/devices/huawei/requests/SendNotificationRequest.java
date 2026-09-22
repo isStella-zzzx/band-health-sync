@@ -50,7 +50,7 @@ public class SendNotificationRequest extends Request {
 
     public static byte getNotificationType(NotificationType type) {
         return switch (type.getGenericType()) {
-            case "generic", "generic_social", "generic_chat" ->
+            case "generic", "generic_social", "generic_chat", "generic_alarm_clock" ->
                     Notifications.NotificationType.generic;
             case "generic_email" -> Notifications.NotificationType.email;
             default -> Notifications.NotificationType.sms;

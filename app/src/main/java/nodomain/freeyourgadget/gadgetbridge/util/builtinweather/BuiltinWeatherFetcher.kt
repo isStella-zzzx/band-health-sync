@@ -16,22 +16,29 @@ import nodomain.freeyourgadget.gadgetbridge.model.WeatherSpec
 import nodomain.freeyourgadget.gadgetbridge.model.weather.Weather
 import nodomain.freeyourgadget.gadgetbridge.model.weather.WeatherMapper
 import nodomain.freeyourgadget.gadgetbridge.util.InternetUtils
-import nodomain.freeyourgadget.gadgetbridge.webview.CurrentPosition
+import nodomain.freeyourgadget.gadgetbridge.GBApplication
 import org.json.JSONObject
 import org.slf4j.LoggerFactory
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
+import kotlin.math.floor
 
 /** Fetches a small, keyless weather payload and translates it to GB's existing WeatherSpec. */
 object BuiltinWeatherFetcher {
     private val LOG = LoggerFactory.getLogger(BuiltinWeatherFetcher::class.java)
     private const val ENDPOINT = "https://api.open-meteo.com/v1/forecast"
+    internal const val FORECAST_DAYS = 8 // Today + seven future days, required by some Huawei devices.
+    private const val SYNODIC_MONTH_SECONDS = 29.530588853 * 24 * 60 * 60
+    private const val REFERENCE_NEW_MOON_EPOCH_SECONDS = 947182440L // 2000-01-06 18:14 UTC
 
     fun fetch(context: Context): FetchResult {
-        val position = CurrentPosition().lastKnownLocation
-        val latitude = position?.latitude ?: 0.0
-        val longitude = position?.longitude ?: 0.0
+        // The weather location is deliberately sticky. CurrentPosition may replace the saved
+        // coordinates with Android's network-derived last known location, which can jump to a VPN
+        // exit country. Only the explicit "use phone location" action should update these values.
+        val prefs = GBApplication.getPrefs()
+        val latitude = prefs.getFloat("location_latitude", 0f).toDouble()
+        val longitude = prefs.getFloat("location_longitude", 0f).toDouble()
         if (!latitude.isFinite() || !longitude.isFinite() ||
             latitude !in -90.0..90.0 || longitude !in -180.0..180.0 ||
             (latitude == 0.0 && longitude == 0.0)
@@ -45,8 +52,10 @@ object BuiltinWeatherFetcher {
             .appendQueryParameter("current", "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m")
             .appendQueryParameter("hourly", "temperature_2m,relative_humidity_2m,precipitation_probability,weather_code,wind_speed_10m,wind_direction_10m")
             .appendQueryParameter("daily", "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset")
-            .appendQueryParameter("forecast_days", "7")
-            .appendQueryParameter("forecast_hours", "24")
+            .appendQueryParameter("forecast_days", FORECAST_DAYS.toString())
+            // The first hourly point is normally the current (already-started) hour. Fetch one
+            // extra so the watch still receives 24 strictly future points after filtering it out.
+            .appendQueryParameter("forecast_hours", "25")
             .appendQueryParameter("timezone", "auto")
             .build()
 
@@ -84,7 +93,7 @@ object BuiltinWeatherFetcher {
             ZoneId.of("UTC")
         }
         val now = epochSeconds(current.optString("time", ""), zone).takeIf { it > 0 }
-            ?: Instant.now().epochSecond
+            ?: Instant.now().epochSecond.toInt()
 
         fun kelvin(celsius: Double): Int = (celsius + 273.15).toInt()
         fun condition(code: Int): Int = mapWmoToOpenWeather(code)
@@ -92,6 +101,11 @@ object BuiltinWeatherFetcher {
         fun optDouble(obj: JSONObject, key: String, index: Int = -1): Double {
             return if (index >= 0) obj.optJSONArray(key)?.optDouble(index, 0.0) ?: 0.0
             else obj.optDouble(key, 0.0)
+        }
+        fun dailyMoonPhase(index: Int): Int {
+            val dayStart = epochSeconds(daily.optJSONArray("time")?.optString(index, ""), zone)
+            val fallback = epochSeconds(daily.optJSONArray("sunrise")?.optString(index, ""), zone)
+            return moonPhaseDegrees((dayStart.takeIf { it > 0 } ?: fallback).toLong())
         }
 
         val currentCode = condition(current.optInt("weather_code", 0))
@@ -113,9 +127,10 @@ object BuiltinWeatherFetcher {
             isCurrentLocation = 1
             sunRise = epochSeconds(daily.getJSONArray("sunrise").optString(0, ""), zone)
             sunSet = epochSeconds(daily.getJSONArray("sunset").optString(0, ""), zone)
+            moonPhase = dailyMoonPhase(0)
         }
 
-        for (i in 1 until minOf(daily.getJSONArray("weather_code").length(), 7)) {
+        for (i in 1 until minOf(daily.getJSONArray("weather_code").length(), FORECAST_DAYS)) {
             spec.forecasts.add(WeatherSpec.Daily().apply {
                 conditionCode = condition(daily.getJSONArray("weather_code").optInt(i, 0))
                 maxTemp = kelvin(daily.getJSONArray("temperature_2m_max").optDouble(i, 0.0))
@@ -123,15 +138,18 @@ object BuiltinWeatherFetcher {
                 precipProbability = probability(daily.optJSONArray("precipitation_probability_max")?.optDouble(i, 0.0) ?: 0.0)
                 sunRise = epochSeconds(daily.getJSONArray("sunrise").optString(i, ""), zone)
                 sunSet = epochSeconds(daily.getJSONArray("sunset").optString(i, ""), zone)
+                moonPhase = dailyMoonPhase(i)
             })
         }
 
         if (hourly != null) {
             val times = hourly.optJSONArray("time")
-            val count = minOf(times?.length() ?: 0, 24)
+            val count = times?.length() ?: 0
             for (i in 0 until count) {
+                val timestamp = epochSeconds(times?.optString(i, ""), zone)
+                if (timestamp <= now || spec.hourly.size >= 24) continue
                 spec.hourly.add(WeatherSpec.Hourly().apply {
-                    timestamp = epochSeconds(times?.optString(i, ""), zone)
+                    this.timestamp = timestamp
                     temp = kelvin(optDouble(hourly, "temperature_2m", i))
                     conditionCode = condition(hourly.optJSONArray("weather_code")?.optInt(i, 0) ?: 0)
                     humidity = hourly.optJSONArray("relative_humidity_2m")?.optInt(i, 0) ?: 0
@@ -148,6 +166,13 @@ object BuiltinWeatherFetcher {
         if (value.isNullOrBlank()) 0 else LocalDateTime.parse(value).atZone(zone).toEpochSecond().toInt()
     } catch (_: Exception) {
         0
+    }
+
+    internal fun moonPhaseDegrees(epochSeconds: Long): Int {
+        if (epochSeconds <= 0) return 0
+        val cycles = (epochSeconds - REFERENCE_NEW_MOON_EPOCH_SECONDS) / SYNODIC_MONTH_SECONDS
+        val fraction = cycles - floor(cycles)
+        return floor(fraction * 360.0).toInt().coerceIn(0, 359)
     }
 
     private fun mapWmoToOpenWeather(code: Int): Int = when (code) {
