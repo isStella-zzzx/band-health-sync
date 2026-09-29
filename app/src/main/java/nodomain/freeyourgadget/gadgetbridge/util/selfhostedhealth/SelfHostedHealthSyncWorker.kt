@@ -111,7 +111,10 @@ class SelfHostedHealthSyncWorker(
             val payload: SelfHostedHealthPayloadSet
             try {
                 samples = readSamples(device, windowStart, now)
-                payload = SelfHostedHealthPayload.build(samples, zone, sleepCursor, now)
+                val legacy = SelfHostedHealthPayload.build(samples, zone, sleepCursor, now)
+                payload = SelfHostedWorkoutPayload.attach(
+                    legacy, SelfHostedWorkoutReader.read(device, windowStart, now), zone, now
+                )
             } catch (e: Exception) {
                 LOG.error("Could not prepare self-hosted health payload for {}", address, e)
                 failure = e.message ?: e.javaClass.simpleName
