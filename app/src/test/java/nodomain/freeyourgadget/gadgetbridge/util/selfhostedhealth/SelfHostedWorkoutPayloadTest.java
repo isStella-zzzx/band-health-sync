@@ -68,11 +68,42 @@ public class SelfHostedWorkoutPayloadTest {
             assertEquals(code[0],wire(row).getInt("raw_type")); assertEquals(code[1],wire(row).getInt("activity_kind"));
         }
     }
-    @Test public void duplicateAndInvalidDurationsFailClosed() {
-        assertThrows(IllegalArgumentException.class,()->SelfHostedWorkoutPayload.attach(empty(),Arrays.asList(cycling(),cycling()),ZONE,NOW));
+    @Test public void duplicateAndConflictingIdentityKeepFirstValidRecord() throws Exception {
+        WorkoutSummaryInput conflict=new WorkoutSummaryInput(42,3,128,START,START+2700L,1700L,
+            null,null,null,null,null,null);
+        for(WorkoutSummaryInput duplicate:Arrays.asList(cycling(),conflict)) {
+            org.json.JSONArray rows=SelfHostedWorkoutPayload.attach(empty(),Arrays.asList(cycling(),duplicate),ZONE,NOW)
+                .getDays().get(0).getBody().getJSONArray("workouts");
+            assertEquals(1,rows.length());
+            assertEquals(wire(cycling()).toString(),rows.getJSONObject(0).toString());
+        }
+    }
+    @Test public void invalidDurationDoesNotDiscardValidOrLegacyData() throws Exception {
         WorkoutSummaryInput invalid=new WorkoutSummaryInput(42,3,128,START,START+2700L,2701L,
             null,null,null,null,null,null);
-        assertThrows(IllegalArgumentException.class,()->wire(invalid));
+        SelfHostedHealthPayloadSet base=SelfHostedWorkoutSyncTest.legacy();
+        for(java.util.List<WorkoutSummaryInput> rows:Arrays.asList(Arrays.asList(invalid,cycling()),Arrays.asList(cycling(),invalid))) {
+            SelfHostedHealthPayloadSet result=SelfHostedWorkoutPayload.attach(base,rows,ZONE,NOW);
+            org.json.JSONArray workouts=result.getDays().get(0).getBody().getJSONArray("workouts");
+            assertEquals(1,workouts.length());
+            assertEquals(wire(cycling()).toString(),workouts.getJSONObject(0).toString());
+            SelfHostedWorkoutSyncTest.assertLegacy(base,result);
+        }
+        assertSame(base,SelfHostedWorkoutPayload.attach(base,Arrays.asList(invalid,invalid),ZONE,NOW));
+        assertFalse(base.getDays().get(0).getBody().has("workouts"));
+    }
+    @Test public void invalidTimestampAndNumericFieldsAreRecordLocal() throws Exception {
+        for(WorkoutSummaryInput invalid:Arrays.asList(
+            new WorkoutSummaryInput(1,3,128,Long.MIN_VALUE,Long.MAX_VALUE,1L,null,null,null,null,null,null),
+            new WorkoutSummaryInput(1,3,128,Long.MIN_VALUE,Long.MIN_VALUE+2,1L,null,null,null,null,null,null),
+            new WorkoutSummaryInput(1,3,128,START,START+2700,1800L,1700L,null,null,null,null,null),
+            new WorkoutSummaryInput(1,3,128,START,START+2700,1800L,null,Double.NaN,null,null,null,null),
+            new WorkoutSummaryInput(1,3,128,START,START+2700,1800L,null,null,null,255,null,null))) {
+            org.json.JSONArray result=SelfHostedWorkoutPayload.attach(empty(),Arrays.asList(invalid,cycling()),ZONE,NOW)
+                .getDays().get(0).getBody().getJSONArray("workouts");
+            assertEquals(1,result.length());
+            assertEquals(wire(cycling()).toString(),result.getJSONObject(0).toString());
+        }
     }
     /** Emits only the explicitly synthetic fixture; never uploads anything. */
     public static void main(String[] args) {
